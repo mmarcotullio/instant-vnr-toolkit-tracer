@@ -1,0 +1,6 @@
+{
+  global: *;
+  local:
+    _ZZN4tcnn16current_capturesEvE*;
+    _ZGVZN4tcnn16current_capturesEvE*;
+};

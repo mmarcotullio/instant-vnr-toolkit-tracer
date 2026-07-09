@@ -1,0 +1,96 @@
+pysampler
+Copyright 2026 Qi Wu
+
+This product is licensed under the Apache License, Version 2.0 (the "License").
+You may obtain a copy of the License in the LICENSE file or at:
+    http://www.apache.org/licenses/LICENSE-2.0
+
+================================================================================
+Third-party software
+================================================================================
+
+This product bundles, vendors, or fetches at build time the following
+third-party components. Each component is distributed under its own license,
+which governs its use independently of the pysampler license. Please consult
+each project's source tree for the full license text and copyright notices.
+
+--------------------------------------------------------------------------------
+Vendored in-tree (csrc/gdt/)
+--------------------------------------------------------------------------------
+
+* gdt - "graphics dev toolkit" header-only math/utility library
+  Copyright 2018 Ingo Wald
+  License: Apache-2.0
+  https://gitlab.com/ingowald/gdt
+
+--------------------------------------------------------------------------------
+Fetched at build time via CMake FetchContent
+--------------------------------------------------------------------------------
+
+* pybind11 v2.13.6
+  Copyright (c) 2016 Wenzel Jakob and contributors
+  License: BSD-3-Clause
+  https://github.com/pybind/pybind11
+
+* OpenVKL v2.0.1               (when ENABLE_OPENVKL=ON)
+  Copyright Intel Corporation and contributors
+  License: Apache-2.0
+  https://github.com/openvkl/openvkl
+
+* Embree v4.3.3                (transitive dep of OpenVKL)
+  Copyright Intel Corporation and contributors
+  License: Apache-2.0
+  https://github.com/RenderKit/embree
+
+* rkcommon v1.13.0             (transitive dep of OpenVKL)
+  Copyright Intel Corporation and contributors
+  License: Apache-2.0
+  https://github.com/ospray/rkcommon
+
+* VTK-m v2.3.0                 (when ENABLE_VTKM=ON)
+  Copyright (c) Kitware, Inc., Sandia National Laboratories, UT-Battelle, LLC,
+  Los Alamos National Security, LLC, and contributors
+  License: BSD-3-Clause-style (see VTK-m's LICENSE.md)
+  https://gitlab.kitware.com/vtk/vtk-m
+
+* owlExaStitcher ("witcher")   (when ENABLE_WITCHER=ON)
+  Copyright the owlExaStitcher authors
+  License: Apache-2.0
+  https://github.com/wilsonCernWq/owlExaStitcher
+  Brings in transitive dependencies:
+    - OWL (Optix Wrapper Library) - Apache-2.0
+      https://github.com/owl-project/owl
+    - umesh - Apache-2.0
+      https://github.com/owl-project/umesh
+    - visionaray - MIT
+      https://github.com/szellmann/visionaray
+
+--------------------------------------------------------------------------------
+Required at build time, not redistributed
+--------------------------------------------------------------------------------
+
+* NVIDIA CUDA Toolkit
+  Copyright NVIDIA Corporation
+  License: NVIDIA CUDA Toolkit EULA
+  https://docs.nvidia.com/cuda/eula/index.html
+
+* NVIDIA OptiX SDK             (when ENABLE_WITCHER=ON)
+  Copyright NVIDIA Corporation
+  License: NVIDIA OptiX Software License Agreement
+  https://developer.nvidia.com/designworks/optix/license-agreement
+
+* Intel ISPC v1.30.0           (installed by setup_venv.sh; required by OpenVKL)
+  Copyright Intel Corporation and contributors
+  License: BSD-3-Clause
+  https://github.com/ispc/ispc
+
+* Intel oneTBB                 (when ENABLE_OPENVKL=ON)
+  Copyright Intel Corporation and contributors
+  License: Apache-2.0
+  https://github.com/uxlfoundation/oneTBB
+
+================================================================================
+
+This NOTICE file is provided for informational purposes only and does not
+modify the License. It is intended to comply with Section 4(d) of the
+Apache License, Version 2.0.

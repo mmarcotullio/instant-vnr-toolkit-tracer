@@ -1,0 +1,6 @@
+[submodule "packages/instantvnr"]
+	path = packages/instantvnr
+	url = git@github.com:wilsonCernWq/instantvnr-py.git
+[submodule "packages/sampler"]
+	path = packages/sampler
+	url = git@github.com:wilsonCernWq/pysampler.git

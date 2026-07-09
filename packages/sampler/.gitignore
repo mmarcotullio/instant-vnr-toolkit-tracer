@@ -1,0 +1,111 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+_build/
+.eggs/
+.installed.cfg
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+uv.lock
+
+# Package managers
+pip-log.txt
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+# Type checkers
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# CMake / C++ build artifacts
+build/
+build_*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+_deps/
+*.o
+*.a
+*.lib
+*.dll
+*.dylib
+config.h
+
+# CUDA
+*.ptx
+*.cubin
+*.fatbin
+
+# PyTorch / ML
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# TensorBoard / training outputs
+runs/
+logs/
+outputs/
+checkpoints/
+
+# Volume / scene data (large binary files)
+*.vti
+*.vts
+*.vtp
+*.vtk
+*.raw
+*.bin
+*.hdf5
+*.h5
+*.nc
+
+# BSON output files
+*.bson
+output.json
+params.json
+
+# imgui state
+imgui.ini
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.cursor/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code
+.claude/settings.local.json
+CLAUDE.md
+
+# Extra files
+log.txt

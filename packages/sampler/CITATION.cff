@@ -1,0 +1,48 @@
+cff-version: 1.2.0
+message: "If you use pysampler in academic work, please cite it using the metadata below."
+type: software
+title: "pysampler: CUDA volume sampler for Volumetric Neural Representations"
+abstract: >-
+  pysampler is a pybind11 extension that exposes a unified Sampler over
+  CUDA tex3D, OpenVKL, and OWL/OptiX backends, with zero-copy access to
+  caller-owned CUDA buffers (e.g. PyTorch tensors). It is designed to
+  accelerate the training of Volumetric Neural Representations (VNRs).
+authors:
+  - family-names: Wu
+    given-names: Qi
+    email: wilson.over.cloud@gmail.com
+version: 0.1.0
+date-released: 2026-04-24
+url: "https://github.com/wilsonCernWq/pysampler"
+repository-code: "https://github.com/wilsonCernWq/pysampler"
+license: Apache-2.0
+keywords:
+  - cuda
+  - volume-rendering
+  - volumetric-neural-representation
+  - implicit-neural-representation
+  - pybind11
+  - pytorch
+  - openvkl
+  - vtk-m
+  - amr
+preferred-citation:
+  type: article
+  title: "Interactive Volume Visualization via Multi-Resolution Hash Encoding Based Neural Representation"
+  authors:
+    - family-names: Wu
+      given-names: Qi
+    - family-names: Bauer
+      given-names: David
+    - family-names: Doyle
+      given-names: Michael J.
+    - family-names: Ma
+      given-names: Kwan-Liu
+  journal: "IEEE Transactions on Visualization and Computer Graphics"
+  year: 2024
+  volume: 30
+  issue: "8"
+  start: 5404
+  end: 5418
+  doi: "10.1109/TVCG.2023.3293121"
+  url: "https://arxiv.org/abs/2207.11620"

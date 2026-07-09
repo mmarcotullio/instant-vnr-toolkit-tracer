@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inrtoolkit"
+version = "0.1.0"
+description = "Instant Volume Neural Representation Toolkit"
+requires-python = ">=3.11"
+dependencies = [
+    "torch",
+    "numpy",
+    "ninja",
+    "tqdm",
+    "tensorboard",
+    "bson",         # standalone BSON codec (dumps/loads) for scene serialization
+    "matplotlib",   # slice image rendering
+    "torchdiffeq",  # differentiable ODE solvers (required by tracer.py)
+]
+
+[project.scripts]
+vnr-train             = "train:main"
+vnr-train-file-backed = "train_file_backed:main"
+vnr-train-stitch      = "train_stitch:main"
+vnr-render            = "render:main"
+
+[project.optional-dependencies]
+gpu         = ["pysampler", "instantvnr-py"]
+test        = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = [
+    "tests",
+    "packages/sampler/tests",
+    "packages/instantvnr/tests",
+]
+
+[tool.setuptools]
+packages    = ["inrtoolkit"]
+py-modules  = ["train", "train_file_backed", "train_stitch", "render"]
+
+# ── uv: route torch to the pytorch wheel index ────────────────────────────────
+# The index URL is injected at install time by setup_env.sh via UV_INDEX, e.g.:
+#   UV_INDEX="pytorch=https://download.pytorch.org/whl/nightly/cu128" uv pip install -e .
+# This keeps the URL out of the committed file so stable vs. nightly vs. CPU
+# can be selected per-machine without changing sources.
+[tool.uv]
+constraint-dependencies = ["setuptools<82"]
+
+[tool.uv.sources]
+torch         = { index = "pytorch" }
+pysampler     = { path = "packages/sampler" }
+instantvnr-py = { path = "packages/instantvnr" }
+
+[tool.uv.extra-build-dependencies]
+tinycudann = ["torch", "setuptools"]

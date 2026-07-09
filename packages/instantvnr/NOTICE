@@ -1,0 +1,107 @@
+instantvnr-py
+Copyright 2019-2026 Qi Wu and contributors
+
+This product includes software developed at VIDILabs (UC Davis), the SCI
+Institute (University of Utah), and Intel Corporation.
+
+==============================================================================
+Vendored components
+==============================================================================
+
+Open Volume Renderer (OVR) -- git submodule at `ovr/`
+  https://github.com/VIDILabs/open-volume-renderer
+  Apache-2.0 (see `ovr/LICENSE`)
+
+  OVR transitively bundles the following third-party components under
+  `ovr/extern/`:
+
+    json/      nlohmann/json
+               https://github.com/nlohmann/json
+               MIT (see `ovr/extern/json/LICENSE.MIT`)
+
+    tinyobj/   tinyobjloader, Syoyo Fujita and contributors
+               https://github.com/tinyobjloader/tinyobjloader
+               MIT (see `ovr/extern/tinyobj/LICENSE`)
+
+    tinygltf/  tinygltf, Syoyo Fujita, Aurelien Chatelain, and contributors
+               https://github.com/syoyo/tinygltf
+               MIT (see `ovr/extern/tinygltf/LICENSE`)
+
+    tinyexr/   tinyexr, Syoyo Fujita and contributors
+               https://github.com/syoyo/tinyexr
+               BSD-3-Clause; bundles miniz (RAD Game Tools / Valve / Rich
+               Geldreich) under MIT/zlib-style terms (see
+               `ovr/extern/tinyexr/LICENSE-miniz`)
+
+    stbi/      stb_image, stb_image_write, Sean Barrett
+               https://github.com/nothings/stb
+               Public domain or MIT, at the user's option
+
+    tfn/       Transfer Function module, Qi Wu and SCI Institute
+               (University of Utah)
+               Apache-2.0 (relicensed under the OVR LICENSE)
+
+    glfwapp/   GLFWApp, Qi Wu
+               MIT, building on gdt by Ingo Wald (Apache-2.0)
+
+    bin2c/     Embedded shader/data helper used to bake binary files into
+               C source. Apache-2.0.
+
+==============================================================================
+Bundled with the C++ extension under `ext/`
+==============================================================================
+
+ext/apps/args.hxx -- Taylor C. Richberger and Pavel Belikov
+  https://github.com/Taywee/args
+  MIT
+
+==============================================================================
+Build-time dependencies (fetched via CMake FetchContent or pip)
+==============================================================================
+
+tiny-cuda-nn (NVIDIA Labs)               BSD-3-Clause
+  https://github.com/NVlabs/tiny-cuda-nn
+  Built from a pinned fork (see `pyproject.toml` for `TCNN_REPOSITORY`
+  and `TCNN_COMMIT_HASH`).
+
+GLFW                                     zlib/libpng
+  https://www.glfw.org/
+
+Dear ImGui + ImPlot                      MIT
+  https://github.com/ocornut/imgui
+  https://github.com/epezent/implot
+
+PyTorch / libtorch                       BSD-3-Clause
+  https://pytorch.org/
+
+oneTBB                                   Apache-2.0
+  https://github.com/oneapi-src/oneTBB
+
+pybind11                                 BSD-3-Clause
+  https://github.com/pybind/pybind11
+
+scikit-build-core                        Apache-2.0
+  https://github.com/scikit-build/scikit-build-core
+
+ISPC (downloaded by `setup_venv.sh`)     BSD-3-Clause
+  https://github.com/ispc/ispc
+
+==============================================================================
+Paper
+==============================================================================
+
+The renderer in this distribution implements:
+
+  Wu, Q., Bauer, D., Doyle, M. J., and Ma, K.-L. (2024).
+  Interactive Volume Visualization via Multi-Resolution Hash Encoding Based
+  Neural Representation.
+  IEEE Transactions on Visualization and Computer Graphics 30(8): 5404-5418.
+  doi:10.1109/TVCG.2023.3306859
+
+See `CITATION.bib` and `CITATION.cff` for citation metadata.
+
+==============================================================================
+
+License identifiers above were inferred from per-file headers and `LICENSE*`
+files at the time this NOTICE was written. Please consult the upstream
+repositories and the per-component license files for the authoritative text.

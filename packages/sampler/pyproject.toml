@@ -1,0 +1,32 @@
+[build-system]
+requires = ["scikit-build-core>=0.11", "pybind11>=2.13"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "pysampler"
+version = "0.1.0"
+description = "CUDA volume sampler — zero-copy access to structured, OpenVDB, and AMR volumes"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Qi Wu", email = "qiwu@nvidia.com" }]
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7", "numpy", "torch"]
+
+[tool.uv]
+constraint-dependencies = ["setuptools<82"]
+
+[tool.scikit-build]
+cmake.source-dir = "."
+cmake.build-type = "Release"
+build-dir = "build"
+wheel.packages = []
+install.components = ["pysampler"]
+
+
+[tool.scikit-build.cmake.define]
+CMAKE_CUDA_ARCHITECTURES = "native"
+ENABLE_OPENVKL  = "ON"  # set to ON to pull in the full rkcommon+embree+OpenVKL stack
+ENABLE_WITCHER  = "ON"  # set to ON to pull in owlExaStitcher (ExaBrick/ExaStitch backends)
+ENABLE_VTKM     = "ON"  # set to ON to build VTK-m 2.3.0 from source (structured-mesh I/O)

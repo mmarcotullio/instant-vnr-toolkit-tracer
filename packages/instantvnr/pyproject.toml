@@ -1,0 +1,60 @@
+[build-system]
+requires = [
+    "scikit-build-core>=0.11",
+    "pybind11>=2.13",
+    "torch",
+    "setuptools",
+    "tinycudann",
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "instantvnr-py"
+version = "0.1.0"
+description = "Instant Volume Neural Representation — training, rendering, and C++ bindings"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Qi Wu", email = "qiwu@nvidia.com" }]
+requires-python = ">=3.11"
+dependencies = [
+    "torch",
+    "numpy",
+    "ninja",
+    "tqdm",
+    "tensorboard",
+    "bson",         # standalone BSON codec (dumps/loads) for scene serialization
+    "matplotlib",
+    "tinycudann",
+]
+
+[project.scripts]
+vnr-batch = "instantvnr.apps:_batch_main"
+vnr-int-single = "instantvnr.apps:_int_single_main"
+vnr-int-dual = "instantvnr.apps:_int_dual_main"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.scikit-build]
+cmake.source-dir = "."
+cmake.build-type = "Release"
+build-dir = "build"
+wheel.packages = []
+install.components = ["instantvnr"]
+
+[tool.scikit-build.cmake.define]
+CMAKE_CUDA_ARCHITECTURES = "native"
+TCNN_REPOSITORY = "https://github.com/wilsonCernWq/tiny-cuda-nn.git"
+TCNN_COMMIT_HASH = "71c6afbc5202ccf8de6dfdf612065cf7f941cb74"
+
+[tool.uv]
+constraint-dependencies = ["setuptools<82"]
+
+# ── uv: route torch to the pytorch wheel index ────────────────────────────────
+# The index URL is injected at install time by setup_venv.sh via UV_INDEX, e.g.:
+#   UV_INDEX="pytorch=https://download.pytorch.org/whl/nightly/cu128" uv pip install .
+[tool.uv.sources]
+torch = { index = "pytorch" }
+tinycudann = { git = "https://github.com/wilsonCernWq/tiny-cuda-nn.git", subdirectory = "bindings/torch", rev = "71c6afbc5202ccf8de6dfdf612065cf7f941cb74" }
+
+[tool.uv.extra-build-dependencies]
+tinycudann = ["torch", "setuptools"]

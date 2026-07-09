@@ -1,0 +1,10 @@
+#pragma once
+#ifndef DVNR_CONFIG_H
+#define DVNR_CONFIG_H
+
+#cmakedefine ENABLE_CUDA
+#cmakedefine ENABLE_OPENVKL
+#cmakedefine ENABLE_VTKM
+#cmakedefine ENABLE_WITCHER
+
+#endif // DVNR_CONFIG_H

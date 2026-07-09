@@ -1,0 +1,3 @@
+[submodule "ovr"]
+	path = ovr
+	url = git@github.com:VIDILabs/open-volume-renderer.git

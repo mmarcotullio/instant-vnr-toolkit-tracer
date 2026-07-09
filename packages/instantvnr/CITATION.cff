@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite both the paper (preferred-citation) and the software entry below."
+title: "instantvnr-py: Python distribution of Instant Volume Neural Representation"
+abstract: "Python wheel of the instantvnr renderer: real-time ray tracing of volumetric neural representations."
+authors:
+  - family-names: Wu
+    given-names: Qi
+version: "0.1.0"
+license: Apache-2.0
+repository-code: "https://github.com/VIDILabs/instantvnr"
+type: software
+preferred-citation:
+  type: article
+  title: "Interactive Volume Visualization via Multi-Resolution Hash Encoding Based Neural Representation"
+  authors:
+    - family-names: Wu
+      given-names: Qi
+    - family-names: Bauer
+      given-names: David
+    - family-names: Doyle
+      given-names: "Michael J."
+    - family-names: Ma
+      given-names: Kwan-Liu
+  journal: "IEEE Transactions on Visualization and Computer Graphics"
+  volume: 30
+  issue: 8
+  start: 5404
+  end: 5418
+  year: 2024
+  publisher:
+    name: IEEE
+  doi: "10.1109/TVCG.2023.3306859"
+  url: "https://arxiv.org/abs/2207.11620"
