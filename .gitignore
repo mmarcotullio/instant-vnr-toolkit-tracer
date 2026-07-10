@@ -109,3 +109,6 @@ CLAUDE.md
 # Project results
 results/
 screenshots/
+
+# Local-only tools
+vector_tools/
