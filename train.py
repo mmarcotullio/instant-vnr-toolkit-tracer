@@ -24,7 +24,7 @@ Usage:
 
   # Streamline training tuning all trace flags
   python train.py --filename /path/to/velocity.raw --dims 128 128 128 --n-channels 3 \\
-                  --train-traces --trace-resolution 2.0 --trace-batch 64 --trace-tmax 0.1
+                  --train-traces --trace-steps 20 --trace-batch 64 --trace-tmax 0.1
 
   # OpenVDB volume (grid name defaults to 'density')
   python train.py --volume-type openvdb --filename /path/to/volume.vdb \\
@@ -59,8 +59,6 @@ import argparse
 
 import numpy as np
 
-np.random.seed(0)
-
 import contextlib
 
 import torch
@@ -83,9 +81,23 @@ except ImportError:
 
 DEVICE = default_device()
 
-_GT_POOL_SIZE     = 1024  # number of pre-computed GT streamlines in the seed pool
-_TRAJ_LOSS_WEIGHT = 0.1   # weight λ on the trajectory loss term: total_loss = point_loss + λ * traj_loss
+_GT_POOL_STRAT_N_REF     = 10    # strat_n at the reference resolution (== previous fixed default)
+_GT_POOL_STRAT_N_REF_DIM = 128   # reference grid resolution (matches --dims default)
+_GT_POOL_STRAT_N_MIN     = 6     # floor: minimum spatial coverage for tiny volumes (N_pool=216)
+_GT_POOL_STRAT_N_MAX     = 32    # cap: bounds CPU pre-compute + worst-case trace_batch (N_pool=32768)
+_TRACE_BATCH_CAP         = 1024  # default per-step streamline batch cap, independent of pool size
+_TRAJ_LOSS_WEIGHT_DEFAULT = 0.1  # default --trace-loss-weight (λ): total_loss = point_loss + λ * traj_loss
 _WARMUP_EPOCHS    = 5     # default epochs of pointwise-only training before ODE loss activates
+_TRACE_STEPS_DEFAULT = 10 # default ODE integration steps per streamline; empirically, more steps
+                           # didn't improve accuracy but did slow training down — see --trace-steps
+
+
+def _compute_gt_pool_strat_n(dims, override=None):
+    """Cells per axis for the stratified GT seed grid, scaled to grid resolution."""
+    if override is not None:
+        return override
+    scaled = _GT_POOL_STRAT_N_REF * (max(dims) / _GT_POOL_STRAT_N_REF_DIM)
+    return int(np.clip(round(scaled), _GT_POOL_STRAT_N_MIN, _GT_POOL_STRAT_N_MAX))
 
 
 def build_model(args, n_output_dims=1):
@@ -133,6 +145,7 @@ def train(expname, sampler, dims, args, output_dir=".", gt_seeds=None, gt_trajs=
         and gt_trajs is not None
         and _TRACER_AVAILABLE
     )
+    warmup_epochs = 0
     if use_traj:
         N_pool       = gt_seeds.shape[0]
         gt_seeds_dev = gt_seeds.to(DEVICE)
@@ -147,15 +160,13 @@ def train(expname, sampler, dims, args, output_dir=".", gt_seeds=None, gt_trajs=
               f"t-max={args.trace_tmax:.4f}  warmup={warmup_epochs} epochs ({warmup_steps} steps)  "
               f"backward={_adj_str}")
 
-    if use_traj:
-        # eps=1e-15: required for TCNN fp16 weights where gradient scales are ~1e-4 to 1e-7
-        optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999), eps=1e-15)
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=0)
-    else:
-        optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999), eps=1e-8)
-        scheduler = optim.lr_scheduler.StepLR(
-            optimizer, step_size=max(1, total_steps // 2), gamma=0.5
-        )
+    # Baseline optimizer/scheduler/clipping, used unconditionally regardless of use_traj
+    # so a --train-traces run and its no-trace baseline differ only in the trajectory
+    # loss term itself, not in the optimization dynamics around it.
+    optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999), eps=1e-8)
+    scheduler = optim.lr_scheduler.StepLR(
+        optimizer, step_size=max(1, total_steps // 2), gamma=0.5
+    )
     scaler = gradscaler()
 
     do_profile = getattr(args, "profile", False)
@@ -172,6 +183,11 @@ def train(expname, sampler, dims, args, output_dir=".", gt_seeds=None, gt_trajs=
         print(f"[info] profiler enabled → {prof_dir}")
     else:
         prof_ctx = contextlib.nullcontext()
+
+    traj_started    = False
+    traj_start_step = None
+
+    loss_history = [] if args.plot_loss else None
 
     progress = trange(1, total_steps + 1)
     t0 = time.time()
@@ -190,9 +206,16 @@ def train(expname, sampler, dims, args, output_dir=".", gt_seeds=None, gt_trajs=
                         preds   = preds.squeeze(1)
                         targets = targets.squeeze(1)
                     l2 = F.mse_loss(preds, targets)
-                    point_loss = l2 if use_traj else 0.5 * F.l1_loss(preds, targets) + 0.5 * l2
+                    point_loss = 0.5 * F.l1_loss(preds, targets) + 0.5 * l2
 
-            if use_traj and step > warmup_steps:
+            if use_traj:
+                traj_active = step > warmup_steps
+                if traj_active and not traj_started:
+                    traj_started, traj_start_step = True, step
+            else:
+                traj_active = False
+
+            if traj_active:
                 with record_function("trajectory"):
                     idx         = torch.randint(0, N_pool, (args.trace_batch,))
                     batch_seeds = gt_seeds_dev[idx]           # (B, 3)
@@ -200,12 +223,15 @@ def train(expname, sampler, dims, args, output_dir=".", gt_seeds=None, gt_trajs=
                     _use_adj    = getattr(args, "trace_adjoint", True)
                     pred_trajs  = trace_streamlines(inr_field, batch_seeds, t_span, adjoint=_use_adj)  # (T, B, 3)
                     traj_loss   = F.mse_loss(pred_trajs, batch_gt)
-                    total_loss  = point_loss + _TRAJ_LOSS_WEIGHT * traj_loss
+                    total_loss  = point_loss + args.trace_loss_weight * traj_loss
             else:
                 traj_loss  = None
                 total_loss = point_loss
 
             psnr = mse2psnr(l2.detach())
+
+            if args.plot_loss:
+                loss_history.append(float(total_loss.detach()))
 
             logger.add_scalar("train/loss",      total_loss, step, new_style=True)
             logger.add_scalar("train/point_mse", l2,         step, new_style=True)
@@ -218,9 +244,6 @@ def train(expname, sampler, dims, args, output_dir=".", gt_seeds=None, gt_trajs=
 
             with record_function("backward"):
                 scaler.scale(total_loss).backward()
-                if use_traj:
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 scaler.step(optimizer)
                 scaler.update()
             scheduler.step()
@@ -242,6 +265,37 @@ def train(expname, sampler, dims, args, output_dir=".", gt_seeds=None, gt_trajs=
     print(f"[info] training complete in {elapsed:.1f}s  ({total_steps} steps)")
 
     os.makedirs(output_dir, exist_ok=True)
+
+    if args.plot_loss:
+        from training_report import save_training_report
+
+        config = [("seed", str(args.seed),
+                    "--seed value (numpy + torch RNGs); pysampler batch draw order uses its own "
+                    "fixed internal seeds (curand 1234 / mt19937 1337), independent of this value "
+                    "but deterministic run-to-run"),
+                   ("train_traces", str(use_traj),
+                    "Whether trajectory-loss training (--train-traces) was active for this run")]
+        if use_traj:
+            config += [
+                ("trace_loss_weight", f"{args.trace_loss_weight:.6g}",
+                 "Weight lambda on the trajectory loss term: total_loss = point_loss + lambda * traj_loss"),
+                ("trace_tmax", f"{args.trace_tmax:.4f}",
+                 "ODE integration endpoint: how far (normalized time) streamlines are traced"),
+                ("trace_steps", str(args.trace_steps),
+                 "ODE integration steps per streamline"),
+                ("gt_pool_size", str(N_pool),
+                 "Number of GT streamlines in the seed pool (coverage density)"),
+                ("trace_batch", str(args.trace_batch),
+                 "Streamlines traced per training step"),
+            ]
+
+        save_training_report(
+            output_dir, expname, loss_history,
+            traj_start_step, elapsed, total_steps, args.epochs,
+            final_psnr=float(psnr), final_point_mse=float(l2.detach()),
+            final_traj_mse=float(traj_loss.detach()) if traj_loss is not None else None,
+            config=config,
+        )
 
     pt_path = os.path.join(output_dir, f"{expname}.pt")
     torch.save(model.state_dict(), pt_path)
@@ -308,6 +362,9 @@ def main():
                         help="samples per training step")
     parser.add_argument("--lr", type=float, default=1e-2,
                         help="initial Adam learning rate")
+    parser.add_argument("--plot-loss", action="store_true",
+                        help="save a loss-curve PNG and a runtime/step-count JSON "
+                             "summary to --output-dir after training")
 
     # Network architecture
     parser.add_argument("--n-levels", type=int, default=16,
@@ -327,12 +384,20 @@ def main():
     parser.add_argument("--trace-warmup-epochs", type=int, default=_WARMUP_EPOCHS,
                         help="epochs of pointwise-only training before ODE trajectory loss activates; "
                              "increase for large datasets where each epoch covers more of the volume")
-    parser.add_argument("--trace-resolution", type=float, default=1.0,
-                        help="target integration steps per voxel (CFL multiplier); higher = more "
-                             "steps and more accurate integration, lower = fewer steps and faster")
-    parser.add_argument("--trace-batch", type=int, default=_GT_POOL_SIZE,
+    parser.add_argument("--trace-steps", type=int, default=_TRACE_STEPS_DEFAULT,
+                        help="ODE integration steps per streamline for both GT pre-computation "
+                             "and the live differentiable tracer; more steps = more accurate "
+                             "integration but slower — empirically, going well above the default "
+                             "did not improve quality, only cost")
+    parser.add_argument("--gt-pool-strat-n", type=int, default=None,
+                        help="cells per axis for the stratified GT seed pool "
+                             "(N_pool = this^3); default: auto-scaled from --dims, "
+                             f"clamped to [{_GT_POOL_STRAT_N_MIN}, {_GT_POOL_STRAT_N_MAX}]")
+    parser.add_argument("--trace-batch", type=int, default=None,
                         help="streamlines traced per training iteration; "
-                             "default: full GT pool for maximum gradient coverage at no extra cost")
+                             f"default: min(GT pool size, {_TRACE_BATCH_CAP}) for good gradient "
+                             "coverage without runaway per-step ODE cost as the pool grows; "
+                             "override manually (e.g. 16-64) if you have VRAM to spare or to spend")
     parser.add_argument("--trace-tmax", type=float, default=None,
                         help="ODE integration endpoint; default: auto-derived as "
                              "0.2/mean_speed from the normalized velocity field, "
@@ -342,6 +407,14 @@ def main():
                              "vs O(trace_steps) for standard backprop. Gradients are identical for "
                              "rk4. Disabled by default: profiling showed 2.5x slower with no memory "
                              "benefit for typical trajectory sizes.")
+    parser.add_argument("--trace-loss-weight", type=float, default=_TRAJ_LOSS_WEIGHT_DEFAULT,
+                        help="weight lambda on the trajectory loss term: "
+                             "total_loss = point_loss + lambda * traj_loss")
+
+    # Reproducibility
+    parser.add_argument("--seed", type=int, default=0,
+                        help="seeds numpy/torch (CPU+CUDA): controls GT streamline seed-pool jitter "
+                             "and trace-batch sampling.")
 
     # Profiling
     parser.add_argument("--profile", action="store_true",
@@ -351,6 +424,11 @@ def main():
 
     args = parser.parse_args()
     expname = args.expname or os.path.splitext(os.path.basename(args.filename))[0]
+
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     if args.volume_type == "openvdb":
         sampler = create_sampler(
@@ -389,7 +467,9 @@ def main():
         gt_field   = DiscreteGridVectorField(vel_tensor)  # CPU, no grad
         # Stratified sampling: divide [0,1]^3 into a grid, one seed per cell.
         # Guarantees uniform domain coverage vs. random clustering.
-        _strat_n   = round(_GT_POOL_SIZE ** (1/3))        # cells per axis (~10 for 1024)
+        _strat_n   = _compute_gt_pool_strat_n(args.dims, override=args.gt_pool_strat_n)
+        print(f"[info] auto GT pool: strat_n={_strat_n} (dims={args.dims}) → "
+              f"{_strat_n**3} seeds; override with --gt-pool-strat-n")
         _offsets   = torch.rand(_strat_n**3, 3)
         _idx       = torch.arange(_strat_n**3)
         _iz        = _idx // (_strat_n * _strat_n)
@@ -397,21 +477,18 @@ def main():
         _ix        = _idx % _strat_n
         _grid      = torch.stack([_ix, _iy, _iz], dim=1).float()
         gt_seeds   = (_grid + _offsets) / _strat_n        # (N_pool, 3) in [0, 1]
+        if args.trace_batch is None:
+            args.trace_batch = min(gt_seeds.shape[0], _TRACE_BATCH_CAP)
         mean_speed = float(np.linalg.norm(raw, axis=0).mean())
         if args.trace_tmax is None:
             args.trace_tmax = float(np.clip(0.2 / max(mean_speed, 0.01), 0.01, 1.0))
             print(f"[info] auto trace_tmax={args.trace_tmax:.4f}  "
                   f"(mean_speed={mean_speed:.4f}; override with --trace-tmax)")
-        # CFL-based step count: dt = voxel_size / (resolution × mean_speed)
-        voxel_size = 1.0 / max(args.dims)
-        dt = voxel_size / (args.trace_resolution * max(mean_speed, 1e-6))
-        args.trace_steps = max(10, min(int(args.trace_tmax / dt), 100))
-        print(f"[info] dynamic tracer: tmax={args.trace_tmax:.4f}  dt={dt:.5f}  steps={args.trace_steps}")
         t_span_cpu = torch.linspace(0, args.trace_tmax, args.trace_steps)
         with torch.no_grad():
             gt_trajs = trace_streamlines(gt_field, gt_seeds, t_span_cpu)  # (T, N_pool, 3)
-        print(f"[info] GT pool ready: {_GT_POOL_SIZE} seeds × {args.trace_steps} steps "
-              f"→ {tuple(gt_trajs.shape)}")
+        print(f"[info] GT pool ready: {gt_seeds.shape[0]} seeds × {args.trace_steps} steps "
+              f"→ {tuple(gt_trajs.shape)}  trace_batch={args.trace_batch}")
         del raw, vel_tensor, gt_field  # free memory before training starts
 
     train(expname, sampler, args.dims, args, output_dir=args.output_dir,
