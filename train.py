@@ -66,15 +66,19 @@ Notes:
 
   --trace-velocity-correction (independent of --train-traces and can be used
   alone or combined with it) replaces the plain trajectory loss with an
-  explicit per-anchor correction: traces the model's own current rollout from 
-  GT seeds (on-policy, not the GT path itself), uses the differentiable tracer 
-  to compute how the velocity at each drifted anchor should change to reduce 
-  the resulting downstream position error, and regresses toward that corrected 
-  target as an ordinary supervised loss. Intended to be applied as a quick 
-  fine-tune on an already-converged no-trace model (see the Usage example above)
-  rather than trained from scratch. --trace-vc-max-correction-frac defaults to 
-  0.05, which has held up well across all datasets tested. See 
-  docs/recorded_hyperparameters.md if you need to verify it for a new one.
+  explicit per-anchor correction. Each epoch traces the model's own current
+  rollout (on-policy) from a dense, deterministic pool of seed points, then
+  sweeps every (seed, time-step) anchor along it once. For each anchor, the
+  differentiable tracer derives how the velocity there should change to
+  reduce the resulting downstream position error; the correction is weighted
+  by the ground-truth field's local curvature (error compounds fastest where
+  curvature is high) and capped in proportion to that anchor's own observed
+  rollout error. The result is regressed toward as an ordinary supervised
+  loss. Intended to be applied as a quick fine-tune on an already-converged
+  no-trace model (see the Usage example above) rather than trained from
+  scratch. --trace-vc-max-correction-frac defaults to 0.05, which has held up
+  well across all datasets tested. See docs/recorded_hyperparameters.md if
+  you need to verify it for a new one.
 """
 
 import os
@@ -97,9 +101,9 @@ from inrtoolkit.training import autocast, gradscaler
 
 try:
     from tracer import (INRVectorField, DiscreteGridVectorField, trace_streamlines_until_exit,
-                         generate_gt_seed_pool,
-                         refresh_on_policy_rollout, sample_on_policy_anchors,
-                         compute_velocity_correction)
+                         generate_gt_seed_pool, stratified_seeds,
+                         refresh_on_policy_rollout,
+                         compute_velocity_correction, curvature)
     _TRACER_AVAILABLE = True
 except ImportError:
     _TRACER_AVAILABLE = False
@@ -123,8 +127,9 @@ _TRACE_STEPS_DEFAULT = 10 # testing has shown that more steps didn't improve acc
 # if you need to re-derive either for a dataset that looks qualitatively different.
 _GRAD_CLIP_NORM_DEFAULT = 2.0
 _VC_MAX_CORRECTION_FRAC_DEFAULT = 0.05
-_VC_LONG_HORIZON_MULTIPLIER_DEFAULT = 15
+_VC_LONG_HORIZON_MULTIPLIER_DEFAULT = 3  # anchor pool spans 3x the base trace horizon, same per-step dt
 _VC_K_DEFAULT = 3
+_VC_STRAT_N_DEFAULT = 40  # cells per axis for the dense anchor-pool seed grid
 
 
 def _compute_gt_pool_strat_n(dims, override=None):
@@ -153,7 +158,7 @@ def build_model(args, n_output_dims=1):
 
 def train(expname, sampler, dims, args, output_dir=".", gt_seeds=None, gt_trajs=None,
           value_ranges=None, velocity_scale=None,
-          vc_max_correction_frac=None, vc_long_pool=None):
+          vc_max_correction_frac=None, vc_long_pool=None, gt_field=None):
     n_channels = sampler.n_channels()
     batchsize  = args.batch_size
     numvoxels  = dims[0] * dims[1] * dims[2]
@@ -204,7 +209,12 @@ def train(expname, sampler, dims, args, output_dir=".", gt_seeds=None, gt_trajs=
         print(f"[info] warmup={warmup_epochs} epochs ({warmup_steps} steps) before "
               f"trajectory-based training activates")
 
-    # Velocity correction (VC): replaces the plain trajectory loss entirely 
+    # Velocity correction (VC): replaces the plain trajectory loss entirely. Each epoch
+    # sweeps every (seed, time-step) anchor in a dense pool once, weighted by the GT field's
+    # local curvature and corrected by an amount proportional to that anchor's own observed
+    # rollout error (see compute_velocity_correction/curvature in tracer.py). The self-rollout
+    # and curvature weights are refreshed once per epoch. steps_per_epoch already means
+    # "one full pass," so --epochs directly controls how many anchor-pool passes VC gets.
     vc_active = use_traj and getattr(args, "trace_velocity_correction", False) and vc_long_pool is not None
     if vc_active:
         vc_pool_seeds, vc_pool_trajs, vc_pool_exit = vc_long_pool
@@ -214,16 +224,35 @@ def train(expname, sampler, dims, args, output_dir=".", gt_seeds=None, gt_trajs=
         vc_T_pool = vc_pool_trajs.shape[0]
         vc_k = args.trace_vc_k
         vc_dt = (args.trace_tmax * args.trace_vc_long_horizon_multiplier) / (vc_T_pool - 1)
+        vc_t_span = torch.linspace(0, vc_dt * (vc_T_pool - 1), vc_T_pool, device=DEVICE)
         vc_valid_t_max = (vc_pool_exit - vc_k).clamp(min=0)
         vc_valid_seed_idx = torch.nonzero(vc_pool_exit >= vc_k, as_tuple=True)[0]
-        vc_refresh_steps = (args.trace_vc_refresh_steps if args.trace_vc_refresh_steps is not None
-                            else int(np.clip(round(total_steps * 0.01), 10, 100)))
+
+        # Flatten every (seed, t) anchor with a valid K-step GT continuation into one dense
+        # pool, covering every point rather than a random subsample. Domain-exit anchors are
+        # already excluded via vc_valid_t_max/vc_valid_seed_idx above.
+        vc_seed_counts = vc_valid_t_max[vc_valid_seed_idx] + 1
+        vc_max_t = int(vc_seed_counts.max().item())
+        _t_grid = torch.arange(vc_max_t, device=DEVICE).unsqueeze(0).expand(len(vc_valid_seed_idx), -1)
+        _anchor_mask = _t_grid < vc_seed_counts.unsqueeze(1)
+        vc_anchor_seed = vc_valid_seed_idx.unsqueeze(1).expand_as(_t_grid)[_anchor_mask]
+        vc_anchor_t = _t_grid[_anchor_mask]
+        vc_n_anchors = vc_anchor_seed.shape[0]
+
         vc_batch = max(256, args.batch_size // 32)
         vc_self_rollout = None
+        vc_weights = None
+        vc_minibatch_schedule = None
+        vc_mb_ptr = 0
+
+        def _vc_gt_field_fn(x):
+            return gt_field(None, x.cpu()).to(DEVICE)
+
         print(f"[info] [VC] velocity correction active: max_correction_frac="
-              f"{vc_max_correction_frac:.4g}  K={vc_k}  refresh_steps={vc_refresh_steps}  "
-              f"batch={vc_batch}  anchors={len(vc_valid_seed_idx)}/{vc_pool_seeds.shape[0]} seeds "
-              f"have >= {vc_k} in-domain steps")
+              f"{vc_max_correction_frac:.4g}  K={vc_k}  "
+              f"horizon_mult={args.trace_vc_long_horizon_multiplier}  batch={vc_batch}  "
+              f"anchors={vc_n_anchors} across {len(vc_valid_seed_idx)}/"
+              f"{vc_pool_seeds.shape[0]} seeds")
 
     # Optimizer/scheduler/clipping held identical regardless of use_traj, so a --train-traces
     # run and its no-trace baseline differ only in the trajectory loss term.
@@ -274,21 +303,31 @@ def train(expname, sampler, dims, args, output_dir=".", gt_seeds=None, gt_trajs=
 
         if traj_active and vc_active:
             # Relative to traj_start_step, not absolute `step` -- otherwise, unless
-            # warmup_steps is a multiple of vc_refresh_steps, this never fires on the
-            # first active step and vc_self_rollout stays None.
-            if (step - traj_start_step) % vc_refresh_steps == 0:
+            # warmup_steps is a multiple of steps_per_epoch, this never fires on the
+            # first active step and vc_self_rollout stays None. One refresh + reshuffle
+            # per epoch; the epoch's steps consume one dense-pool minibatch each,
+            # wrapping around if steps_per_epoch exceeds the minibatch count.
+            if (step - traj_start_step) % steps_per_epoch == 0:
                 vc_self_rollout = refresh_on_policy_rollout(
-                    inr_field, vc_pool_seeds, torch.linspace(
-                        0, vc_dt * (vc_T_pool - 1), vc_T_pool, device=DEVICE),
-                    _ODE_BOUNDS_UNIT)
+                    inr_field, vc_pool_seeds, vc_t_span, _ODE_BOUNDS_UNIT)
+                with torch.no_grad():
+                    _vc_anchor_x0 = vc_self_rollout[vc_anchor_t, vc_anchor_seed]
+                    vc_weights = curvature(_vc_gt_field_fn, _vc_anchor_x0)
+                    vc_weights = (vc_weights / vc_weights.mean().clamp_min(1e-8)).clamp(max=10.0)
+                vc_minibatch_schedule = list(
+                    torch.randperm(vc_n_anchors, device=DEVICE).split(vc_batch))
+                vc_mb_ptr = 0
 
-            vc_x0, vc_x_target = sample_on_policy_anchors(
-                vc_self_rollout, vc_pool_trajs, vc_valid_seed_idx, vc_valid_t_max,
-                vc_T_pool, vc_k, vc_batch)
+            vc_idx = vc_minibatch_schedule[vc_mb_ptr % len(vc_minibatch_schedule)]
+            vc_mb_ptr += 1
+            vc_s_idx, vc_t_idx, vc_w = vc_anchor_seed[vc_idx], vc_anchor_t[vc_idx], vc_weights[vc_idx]
+            vc_x0 = vc_self_rollout[vc_t_idx, vc_s_idx]
+            vc_x_target = vc_pool_trajs[vc_t_idx + vc_k, vc_s_idx]
+
             vc_target_v0 = compute_velocity_correction(
-                inr_field, vc_x0, vc_x_target, vc_dt, vc_k, vc_max_correction_frac)
+                inr_field, vc_x0, vc_x_target, vc_dt, vc_k, vc_max_correction_frac, adaptive=True)
             vc_v0_pred = inr_field(None, vc_x0, clamp=False)
-            traj_loss = F.mse_loss(vc_v0_pred, vc_target_v0)
+            traj_loss = ((vc_v0_pred - vc_target_v0).pow(2).sum(dim=-1) * vc_w).mean()
 
             total_loss = point_loss + traj_loss
         elif traj_active:
@@ -498,21 +537,21 @@ def main():
                              "every dataset tested (see docs/recorded_hyperparameters.md); "
                              "run tools/calibrate_hyperparams.py if a new dataset's flow "
                              "looks qualitatively different.")
-    parser.add_argument("--trace-vc-refresh-steps", type=int, default=None,
-                        help="[VC] steps between on-policy self-rollout refreshes (default: "
-                             "clamp(round(total_steps*0.01), 10, 100))")
     parser.add_argument("--trace-vc-long-horizon-multiplier", type=int,
                         default=_VC_LONG_HORIZON_MULTIPLIER_DEFAULT,
-                        help="[VC] the GT pool used for on-policy anchors spans this many times "
+                        help="[VC] the dense anchor pool spans this many times "
                              "--trace-tmax/--trace-steps (at the same fine dt, not a coarser one "
-                             "over the same duration) -- the plain trace loss's own short "
-                             "horizon shows negligible on-policy drift for an already-accurate "
-                             "model, so a longer horizon is needed for anchors to reflect "
-                             "genuinely accumulated error")
+                             "over the same duration) -- closes the gap between the short "
+                             "correction horizon and the much longer evaluation horizon")
     parser.add_argument("--trace-vc-k", type=int, default=_VC_K_DEFAULT,
                         help="[VC] local correction lookahead, in GT-pool steps: how far forward "
                              "the differentiable tracer integrates from an anchor to measure the "
                              "endpoint error used to derive that anchor's correction")
+    parser.add_argument("--trace-vc-strat-n", type=int, default=_VC_STRAT_N_DEFAULT,
+                        help="[VC] cells per axis for the dense stratified anchor pool "
+                             "(N_pool = this^3) that every training epoch sweeps once -- "
+                             "independent of --gt-pool-strat-n, which is capped lower "
+                             f"({_GT_POOL_STRAT_N_MAX}) than this flag's validated default")
 
     # Reproducibility
     parser.add_argument("--seed", type=int, default=0,
@@ -551,7 +590,7 @@ def main():
     # GT streamline pre-computation for streamline-aware training. --train-traces and
     # --trace-velocity-correction are independent mechanisms that both need this same 
     # GT field, so either one triggers it.
-    gt_seeds = gt_trajs = gt_exit_step = value_ranges = velocity_scale = None
+    gt_seeds = gt_trajs = gt_exit_step = value_ranges = velocity_scale = gt_field = None
     vc_max_correction_frac = vc_long_pool = None
     if (args.n_channels == 3 and (args.train_traces or args.trace_velocity_correction)
             and args.volume_type == "structuredRegular"):
@@ -596,19 +635,32 @@ def main():
         if args.trace_velocity_correction:
             vc_max_correction_frac = args.trace_vc_max_correction_frac
 
+            # Dense stratified anchor pool (own strat_n, independent of the plain branch's
+            # auto-scaled/capped _strat_n), traced over the extended horizon at the same
+            # fine per-step dt as the base trace horizon. gt_field is needed (not deleted
+            # below) since curvature weights are recomputed at the model's own refreshed
+            # self-rollout positions each epoch, not just at this pool's own grid points.
             _vc_mult = args.trace_vc_long_horizon_multiplier
-            vc_long_pool = generate_gt_seed_pool(
-                gt_field, _strat_n, args.trace_tmax * _vc_mult, args.trace_steps * _vc_mult,
-                bounds=_ODE_BOUNDS_UNIT)
-            print(f"[info] [VC] on-policy long-horizon pool: {vc_long_pool[0].shape[0]} seeds × "
-                  f"{args.trace_steps * _vc_mult} steps (x{_vc_mult} the base trace horizon)")
+            _vc_trace_steps = args.trace_steps * _vc_mult
+            _vc_seeds = stratified_seeds(args.trace_vc_strat_n)
+            _vc_t_span = torch.linspace(0, args.trace_tmax * _vc_mult, _vc_trace_steps)
+            with torch.no_grad():
+                _vc_trajs, _vc_exit = trace_streamlines_until_exit(
+                    gt_field, _vc_seeds, _vc_t_span, _ODE_BOUNDS_UNIT)
+            vc_long_pool = (_vc_seeds, _vc_trajs, _vc_exit)
+            print(f"[info] [VC] dense anchor pool: {_vc_seeds.shape[0]} seeds "
+                  f"(strat_n={args.trace_vc_strat_n}) × {_vc_trace_steps} steps "
+                  f"(x{_vc_mult} the base trace horizon)")
 
-        del raw, vel_tensor, gt_field  # the CPU copies are no longer needed either way
+        del raw, vel_tensor  # the CPU copy of the raw array is no longer needed either way
+        if not args.trace_velocity_correction:
+            gt_field = None  # VC keeps it for per-epoch curvature-weight recomputation
 
     train(expname, sampler, args.dims, args, output_dir=args.output_dir,
           gt_seeds=gt_seeds, gt_trajs=gt_trajs,
           value_ranges=value_ranges, velocity_scale=velocity_scale,
-          vc_max_correction_frac=vc_max_correction_frac, vc_long_pool=vc_long_pool)
+          vc_max_correction_frac=vc_max_correction_frac, vc_long_pool=vc_long_pool,
+          gt_field=gt_field)
 
 
 if __name__ == "__main__":

@@ -240,7 +240,8 @@ def sample_on_policy_anchors(self_rollout_trajs: torch.Tensor, pool_trajs: torch
 
 
 def compute_velocity_correction(inr_field, x0: torch.Tensor, x_target: torch.Tensor,
-                                 dt: float, K: int, max_correction_frac: float) -> torch.Tensor:
+                                 dt: float, K: int, max_correction_frac: float,
+                                 adaptive: bool = False) -> torch.Tensor:
     """Derives one velocity-correction target per anchor point (see train.py's
     --trace-velocity-correction).
 
@@ -255,6 +256,14 @@ def compute_velocity_correction(inr_field, x0: torch.Tensor, x_target: torch.Ten
     the gradient's direction, not the raw gradient magnitude, keeping it
     dataset-scale-invariant (an anchor already on the true path yields zero
     correction).
+
+    If `adaptive`, that fixed cap is additionally scaled down by how large the
+    rollout's own endpoint error actually is relative to the rollout's own
+    displacement scale (clamped to [0, 1]) -- so the cap is a ceiling reached only
+    when the anchor's observed error is already at or beyond the rollout's own
+    scale, not a size applied uniformly regardless of how wrong the anchor already
+    is. Needed once anchors are drawn from a longer, less-certain horizon than the
+    one `max_correction_frac` was calibrated against (see train.py).
 
     Returns target_v0 (B, 3), fully detached.
     """
@@ -271,5 +280,33 @@ def compute_velocity_correction(inr_field, x0: torch.Tensor, x_target: torch.Ten
     v0_norm = v0.detach().norm(dim=-1, keepdim=True).clamp_min(1e-8)
     correction_norm = grad_v0.norm(dim=-1, keepdim=True).clamp_min(1e-12)
     direction = -grad_v0 / correction_norm
-    correction = direction * max_correction_frac * v0_norm
+    cap = max_correction_frac * v0_norm
+    if adaptive:
+        endpoint_err = (x.detach() - x_target).norm(dim=-1, keepdim=True)
+        displacement_scale = (v0_norm * dt * K).clamp_min(1e-8)
+        cap = cap * (endpoint_err / displacement_scale).clamp(max=1.0)
+    correction = direction * cap
     return v0.detach() + correction
+
+
+def finite_difference_jacobian(field_fn, x: torch.Tensor, h: float = 1.0 / 256) -> torch.Tensor:
+    """Central-difference Jacobian of a vector field fn at x, one column per input dim."""
+    cols = []
+    for j in range(3):
+        offset = torch.zeros_like(x)
+        offset[:, j] = h
+        plus = field_fn((x + offset).clamp(0.0, 1.0))
+        minus = field_fn((x - offset).clamp(0.0, 1.0))
+        cols.append((plus - minus) / (2 * h))
+    return torch.stack(cols, dim=-1)
+
+
+def curvature(field_fn, x: torch.Tensor) -> torch.Tensor:
+    """kappa = |v x a|/|v|^3, a = (v.grad)v -- used as a correction-priority weight: points
+    where a velocity error compounds fastest get more correction pressure."""
+    with torch.no_grad():
+        v = field_fn(x)
+        J = finite_difference_jacobian(field_fn, x)
+        a = torch.einsum("nij,nj->ni", J, v)
+        speed = v.norm(dim=-1)
+        return torch.cross(v, a, dim=-1).norm(dim=-1) / speed.clamp_min(1e-8).pow(3)
